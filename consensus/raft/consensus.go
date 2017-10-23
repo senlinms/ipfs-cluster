@@ -22,20 +22,13 @@ import (
 
 var logger = logging.Logger("consensus")
 
-// LeaderTimeout specifies how long to wait before failing an operation
-// because there is no leader
-var LeaderTimeout = 15 * time.Second
-
-// CommitRetries specifies how many times we retry a failed commit until
-// we give up
-var CommitRetries = 2
-
 // Consensus handles the work of keeping a shared-state between
 // the peers of an IPFS Cluster, as well as modifying that state and
 // applying any updates in a thread-safe manner.
 type Consensus struct {
 	ctx    context.Context
 	cancel func()
+	config *Config
 
 	host host.Host
 
@@ -80,6 +73,7 @@ func NewConsensus(clusterPeers []peer.ID, host host.Host, cfg *Config, state sta
 	cc := &Consensus{
 		ctx:       ctx,
 		cancel:    cancel,
+		config:    cfg,
 		host:      host,
 		consensus: consensus,
 		actor:     actor,
@@ -95,7 +89,9 @@ func NewConsensus(clusterPeers []peer.ID, host host.Host, cfg *Config, state sta
 
 // WaitForSync waits for a leader and for the state to be up to date, then returns.
 func (cc *Consensus) WaitForSync() error {
-	leaderCtx, cancel := context.WithTimeout(cc.ctx, LeaderTimeout)
+	leaderCtx, cancel := context.WithTimeout(
+		cc.ctx,
+		cc.cfg.WaitForLeaderTimeout)
 	defer cancel()
 	err := cc.raft.WaitForLeader(leaderCtx)
 	if err != nil {
@@ -217,7 +213,9 @@ func (cc *Consensus) op(argi interface{}, t LogOpType) *LogOp {
 func (cc *Consensus) redirectToLeader(method string, arg interface{}) (bool, error) {
 	leader, err := cc.Leader()
 	if err != nil {
-		rctx, cancel := context.WithTimeout(cc.ctx, LeaderTimeout)
+		rctx, cancel := context.WithTimeout(
+			cc.ctx,
+			cc.cfg.WaitForLeaderTimeout)
 		defer cancel()
 		err := cc.raft.WaitForLeader(rctx)
 		if err != nil {
@@ -239,7 +237,7 @@ func (cc *Consensus) redirectToLeader(method string, arg interface{}) (bool, err
 
 func (cc *Consensus) logOpCid(rpcOp string, opType LogOpType, pin api.Pin) error {
 	var finalErr error
-	for i := 0; i < CommitRetries; i++ {
+	for i := 0; i <= cc.cfg.CommitRetries; i++ {
 		logger.Debugf("Try %d", i)
 		redirected, err := cc.redirectToLeader(
 			rpcOp, pin.ToSerial())
@@ -293,7 +291,7 @@ func (cc *Consensus) LogUnpin(c api.Pin) error {
 // forward the operation to the leader if this is not it.
 func (cc *Consensus) LogAddPeer(addr ma.Multiaddr) error {
 	var finalErr error
-	for i := 0; i < CommitRetries; i++ {
+	for i := 0; i <= cc.cfg.CommitRetries; i++ {
 		logger.Debugf("Try %d", i)
 		redirected, err := cc.redirectToLeader(
 			"ConsensusLogAddPeer", api.MultiaddrToSerial(addr))
@@ -344,7 +342,7 @@ func (cc *Consensus) LogAddPeer(addr ma.Multiaddr) error {
 // forward the operation to the leader if this is not it.
 func (cc *Consensus) LogRmPeer(pid peer.ID) error {
 	var finalErr error
-	for i := 0; i < CommitRetries; i++ {
+	for i := 0; i <= cc.cfg.CommitRetries; i++ {
 		logger.Debugf("Try %d", i)
 		redirected, err := cc.redirectToLeader("ConsensusLogRmPeer", pid)
 		if err != nil {

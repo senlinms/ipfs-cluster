@@ -15,8 +15,12 @@ import (
 // configuration section.
 var configKey = "raft"
 
-// DefaultDataSubFolder is the default subfolder in which Raft's data is stored.
-var DefaultDataSubFolder = "ipfs-cluster-data"
+// Configuration defaults
+var (
+	DefaultDataSubFolder        = "ipfs-cluster-data"
+	DefaultWaitForLeaderTimeout = 15 * time.Second
+	DefaultCommitRetries        = 1
+)
 
 // Config allows to configure the Raft Consensus component for ipfs-cluster.
 // The component's configuration section is represented by ConfigJSON.
@@ -28,6 +32,12 @@ type Config struct {
 	HashiraftCfg *hashiraft.Config
 	// A folder to store Raft's data.
 	DataFolder string
+	// LeaderTimeout specifies how long to wait for a leader before
+	// failing an operation.
+	WaitForLeaderTimeout time.Duration
+	// CommitRetries specifies how many times we retry a failed commit until
+	// we give up
+	CommitRetries int
 }
 
 // ConfigJSON represents a human-friendly Config
@@ -40,6 +50,12 @@ type jsonConfig struct {
 	// Storage folder for snapshots, log store etc. Used by
 	// the Raft.
 	DataFolder string `json:"data_folder,omitempty"`
+
+	// How long to wait for a leader before failing
+	WaitForLeaderTimeout string `json:"wait_for_leader_timeout"`
+
+	// How many retries to make upon a failed commit
+	CommitRetries int `json:"commit_retries"`
 
 	// HeartbeatTimeout specifies the time in follower state without
 	// a leader before we attempt an election.
@@ -103,6 +119,13 @@ func (cfg *Config) Validate() error {
 	if cfg.HashiraftCfg == nil {
 		return errors.New("No hashicorp/raft.Config")
 	}
+	if cfg.WaitForLeaderTimeout <= 0 {
+		return errors.New("wait_for_leader_timeout <= 0")
+	}
+
+	if cfg.CommitRetries < 0 {
+		return errors.New("commit_retries is invalid")
+	}
 
 	return hashiraft.ValidateConfig(cfg.HashiraftCfg)
 }
@@ -120,39 +143,24 @@ func (cfg *Config) LoadJSON(raw []byte) error {
 
 	cfg.setDefaults()
 
-	// Parse durations from strings
-	heartbeatTimeout, err := time.ParseDuration(jcfg.HeartbeatTimeout)
-	if err != nil && jcfg.HeartbeatTimeout != "" {
-		logger.Error("Error parsing heartbeat_timeout")
-		return err
-	}
+	// Parse durations. We ignore errors as 0 will take Default values
+	// or be caught by Validate().
+	waitLeaderTimeout, _ := time.ParseDuration(jcfg.WaitForLeaderTimeout)
+	heartbeatTimeout, _ := time.ParseDuration(jcfg.HeartbeatTimeout)
+	electionTimeout, _ := time.ParseDuration(jcfg.ElectionTimeout)
+	commitTimeout, _ := time.ParseDuration(jcfg.CommitTimeout)
+	snapshotInterval, _ := time.ParseDuration(jcfg.SnapshotInterval)
+	leaderLeaseTimeout, _ := time.ParseDuration(jcfg.LeaderLeaseTimeout)
 
-	electionTimeout, err := time.ParseDuration(jcfg.ElectionTimeout)
-	if err != nil && jcfg.ElectionTimeout != "" {
-		logger.Error("Error parsing election_timeout")
-		return err
-	}
-
-	commitTimeout, err := time.ParseDuration(jcfg.CommitTimeout)
-	if err != nil && jcfg.CommitTimeout != "" {
-		logger.Error("Error parsing commit_timeout")
-		return err
-	}
-
-	snapshotInterval, err := time.ParseDuration(jcfg.SnapshotInterval)
-	if err != nil && jcfg.SnapshotInterval != "" {
-		logger.Error("Error parsing snapshot_interval")
-		return err
-	}
-
-	leaderLeaseTimeout, err := time.ParseDuration(jcfg.LeaderLeaseTimeout)
-	if err != nil && jcfg.LeaderLeaseTimeout != "" {
-		logger.Error("Error parsing leader_lease_timeout")
-		return err
-	}
-
+	// Set all values in config. For some, take defaults if they are 0.
 	// Set values from jcfg if they are not 0 values
+
+	// Own values
 	config.SetIfNotDefault(jcfg.DataFolder, &cfg.DataFolder)
+	config.SetIfNotDefault(waitForLeader, &cfg.WaitForLeaderTimeout)
+	config.CommitRetries = jcfg.CommitRetries
+
+	// Raft values
 	config.SetIfNotDefault(heartbeatTimeout, &cfg.HashiraftCfg.HeartbeatTimeout)
 	config.SetIfNotDefault(electionTimeout, &cfg.HashiraftCfg.ElectionTimeout)
 	config.SetIfNotDefault(commitTimeout, &cfg.HashiraftCfg.CommitTimeout)
@@ -163,13 +171,15 @@ func (cfg *Config) LoadJSON(raw []byte) error {
 	config.SetIfNotDefault(jcfg.SnapshotThreshold, &cfg.HashiraftCfg.SnapshotThreshold)
 	config.SetIfNotDefault(leaderLeaseTimeout, &cfg.HashiraftCfg.LeaderLeaseTimeout)
 
-	return nil
+	return config.Validate()
 }
 
 // ToJSON returns the pretty JSON representation of a Config.
 func (cfg *Config) ToJSON() ([]byte, error) {
 	jcfg := &jsonConfig{}
 	jcfg.DataFolder = cfg.DataFolder
+	jcfg.WaitForLeaderTimeout = cfg.WaitForLeaderTimeout.String()
+	jcfg.CommitRetries = cfg.CommitRetries
 	jcfg.HeartbeatTimeout = cfg.HashiraftCfg.HeartbeatTimeout.String()
 	jcfg.ElectionTimeout = cfg.HashiraftCfg.ElectionTimeout.String()
 	jcfg.CommitTimeout = cfg.HashiraftCfg.CommitTimeout.String()
@@ -185,7 +195,26 @@ func (cfg *Config) ToJSON() ([]byte, error) {
 
 // Default initializes this configuration with working defaults.
 func (cfg *Config) Default() error {
-	cfg.setDefaults()
+	cfg.DataFolder = "" // empty so it gets ommitted
+	cfg.WaitForLeaderTimeout = DefaultWaitForLeaderTimeout
+	cfg.CommitRetries = DefaultCommitRetries
+	cfg.HashiraftCfg = hashiraft.DefaultConfig()
+
+	// These options are imposed over any Default Raft Config.
+	// Changing them causes cluster peers to show
+	// difficult-to-understand behaviours,
+	// usually around the add/remove of peers.
+	// That means that changing them will make users wonder why something
+	// does not work the way it is expected to.
+	// i.e. ShutdownOnRemove will cause that no snapshot will be taken
+	// when trying to shutdown a peer after removing it from a cluster.
+	cfg.HashiraftCfg.DisableBootstrapAfterElect = false
+	cfg.HashiraftCfg.EnableSingleNode = true
+	cfg.HashiraftCfg.ShutdownOnRemove = false
+
+	// Set up logging
+	cfg.HashiraftCfg.LogOutput = ioutil.Discard
+	cfg.HashiraftCfg.Logger = raftStdLogger // see logging.go
 	return nil
 }
 

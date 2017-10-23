@@ -8,6 +8,8 @@ import (
 var cfgJSON = []byte(`
 {
     "heartbeat_timeout": "1s",
+    "commit_retries": 1,
+    "wait_for_leader_timeout": "15s",
     "election_timeout": "1s",
     "commit_timeout": "50ms",
     "max_append_entries": 64,
@@ -99,6 +101,18 @@ func TestDefault(t *testing.T) {
 
 	cfg.Default()
 	cfg.HashiraftCfg = nil
+	if cfg.Validate() == nil {
+		t.Fatal("expected error validating")
+	}
+
+	cfg.Default()
+	cfg.CommitRetries = -1
+	if cfg.Validate() == nil {
+		t.Fatal("expected error validating")
+	}
+
+	cfg.Default()
+	cfg.WaitForLeaderTimeout = 0
 	if cfg.Validate() == nil {
 		t.Fatal("expected error validating")
 	}
