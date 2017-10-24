@@ -165,7 +165,9 @@ func (c *Cluster) setupConsensus(consensuscfg *raft.Config) error {
 	if len(c.config.Peers) > 0 {
 		startPeers = peersFromMultiaddrs(c.config.Peers)
 	} else {
-		startPeers = peersFromMultiaddrs(c.config.Bootstrap)
+		// start as single cluster before being added
+		// to the bootstrapper peers' cluster.
+		startPeers = []peer.ID{}
 	}
 
 	consensus, err := raft.NewConsensus(

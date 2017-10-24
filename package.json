@@ -39,9 +39,9 @@
     },
     {
       "author": "hashicorp",
-      "hash": "QmfNTPUT6FKg2wyPcqgn3tKuGJWnvu6QqwHoo56FgcR4c2",
+      "hash": "QmZa48BnsaEMVNf1hT2HYP2ak97fqyTnadXu6xSu2Y8xui",
       "name": "raft-boltdb",
-      "version": "2017.7.27"
+      "version": "2017.10.24"
     },
     {
       "author": "gorilla",
@@ -57,9 +57,9 @@
     },
     {
       "author": "libp2p",
-      "hash": "QmTJoXQ24GqDf9MqAUwf3vW38HG6ahE9S7GzZoRMEeE8Kc",
+      "hash": "QmcWmYQEQCrezztaQ81nXzMx2jaAEow17wdesDAjjR769r",
       "name": "go-libp2p-pnet",
-      "version": "2.2.4"
+      "version": "2.3.1"
     }
   ],
   "gxVersion": "0.11.0",

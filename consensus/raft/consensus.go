@@ -35,7 +35,7 @@ type Consensus struct {
 	consensus consensus.OpLogConsensus
 	actor     consensus.Actor
 	baseOp    *LogOp
-	raft      *Raft
+	raft      *raftWrapper
 
 	rpcClient *rpc.Client
 	rpcReady  chan struct{}
@@ -60,8 +60,9 @@ func NewConsensus(clusterPeers []peer.ID, host host.Host, cfg *Config, state sta
 
 	logger.Infof("starting Consensus and waiting for a leader...")
 	consensus := libp2praft.NewOpLog(state, op)
-	raft, err := NewRaft(clusterPeers, host, cfg, consensus.FSM())
+	raft, err := newRaftWrapper(clusterPeers, host, cfg, consensus.FSM())
 	if err != nil {
+		logger.Error("error creating raft: ", err)
 		return nil, err
 	}
 	actor := libp2praft.NewActor(raft.raft)
@@ -91,7 +92,7 @@ func NewConsensus(clusterPeers []peer.ID, host host.Host, cfg *Config, state sta
 func (cc *Consensus) WaitForSync() error {
 	leaderCtx, cancel := context.WithTimeout(
 		cc.ctx,
-		cc.cfg.WaitForLeaderTimeout)
+		cc.config.WaitForLeaderTimeout)
 	defer cancel()
 	err := cc.raft.WaitForLeader(leaderCtx)
 	if err != nil {
@@ -161,6 +162,9 @@ func (cc *Consensus) Shutdown() error {
 
 	// Raft shutdown
 	errMsgs := ""
+
+	// TODO: Do we need to make a snapshots if the rest of the
+	// data is still there?
 	err := cc.raft.Snapshot()
 	if err != nil {
 		errMsgs += err.Error()
@@ -171,7 +175,7 @@ func (cc *Consensus) Shutdown() error {
 	}
 
 	if errMsgs != "" {
-		errMsgs += "Consensus shutdown unsuccessful"
+		errMsgs = "Consensus shutdown unsuccessful: " + errMsgs
 		logger.Error(errMsgs)
 		return errors.New(errMsgs)
 	}
@@ -215,7 +219,7 @@ func (cc *Consensus) redirectToLeader(method string, arg interface{}) (bool, err
 	if err != nil {
 		rctx, cancel := context.WithTimeout(
 			cc.ctx,
-			cc.cfg.WaitForLeaderTimeout)
+			cc.config.WaitForLeaderTimeout)
 		defer cancel()
 		err := cc.raft.WaitForLeader(rctx)
 		if err != nil {
@@ -237,7 +241,7 @@ func (cc *Consensus) redirectToLeader(method string, arg interface{}) (bool, err
 
 func (cc *Consensus) logOpCid(rpcOp string, opType LogOpType, pin api.Pin) error {
 	var finalErr error
-	for i := 0; i <= cc.cfg.CommitRetries; i++ {
+	for i := 0; i <= cc.config.CommitRetries; i++ {
 		logger.Debugf("Try %d", i)
 		redirected, err := cc.redirectToLeader(
 			rpcOp, pin.ToSerial())
@@ -291,7 +295,7 @@ func (cc *Consensus) LogUnpin(c api.Pin) error {
 // forward the operation to the leader if this is not it.
 func (cc *Consensus) LogAddPeer(addr ma.Multiaddr) error {
 	var finalErr error
-	for i := 0; i <= cc.cfg.CommitRetries; i++ {
+	for i := 0; i <= cc.config.CommitRetries; i++ {
 		logger.Debugf("Try %d", i)
 		redirected, err := cc.redirectToLeader(
 			"ConsensusLogAddPeer", api.MultiaddrToSerial(addr))
@@ -342,7 +346,7 @@ func (cc *Consensus) LogAddPeer(addr ma.Multiaddr) error {
 // forward the operation to the leader if this is not it.
 func (cc *Consensus) LogRmPeer(pid peer.ID) error {
 	var finalErr error
-	for i := 0; i <= cc.cfg.CommitRetries; i++ {
+	for i := 0; i <= cc.config.CommitRetries; i++ {
 		logger.Debugf("Try %d", i)
 		redirected, err := cc.redirectToLeader("ConsensusLogRmPeer", pid)
 		if err != nil {
@@ -403,6 +407,7 @@ func (cc *Consensus) State() (state.State, error) {
 // Leader returns the peerID of the Leader of the
 // cluster. It returns an error when there is no leader.
 func (cc *Consensus) Leader() (peer.ID, error) {
+	// Note the hard-dependency on raft here...
 	raftactor := cc.actor.(*libp2praft.Actor)
 	return raftactor.Leader()
 }
@@ -411,5 +416,8 @@ func (cc *Consensus) Leader() (peer.ID, error) {
 // state with the state provided. Only the consensus leader
 // can perform this operation.
 func (cc *Consensus) Rollback(state state.State) error {
+	// This is unused. It *might* be used for upgrades.
+	// There is rather untested magic in libp2p-raft's FSM()
+	// to make this possible.
 	return cc.consensus.Rollback(state)
 }

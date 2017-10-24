@@ -68,18 +68,23 @@ func testingConsensus(t *testing.T, port int) *Consensus {
 func TestShutdownConsensus(t *testing.T) {
 	// Bring it up twice to make sure shutdown cleans up properly
 	// but also to make sure raft comes up ok when re-initialized
-	defer cleanRaft(p2pPort)
 	cc := testingConsensus(t, p2pPort)
 	err := cc.Shutdown()
 	if err != nil {
 		t.Fatal("Consensus cannot shutdown:", err)
 	}
-	cc.Shutdown()
+	err = cc.Shutdown() // should be fine to shutdown twice
+	if err != nil {
+		t.Fatal("Consensus should be able to shutdown several times")
+	}
+	cleanRaft(p2pPort)
+
 	cc = testingConsensus(t, p2pPort)
 	err = cc.Shutdown()
 	if err != nil {
 		t.Fatal("Consensus cannot shutdown:", err)
 	}
+	cleanRaft(p2pPort)
 }
 
 func TestConsensusPin(t *testing.T) {
